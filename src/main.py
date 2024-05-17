@@ -13,8 +13,8 @@ from src.utils.parsing import load_json_one_depth_v2
 from src.utils.intervals import set_interval
 
 metrics = {
-    "e2e_count_total": defaultdict(int),
-    "e2e_latency_total": defaultdict(float),
+    "e2e_count_total": {},
+    "e2e_latency_total": {},
 }
 
 db = {}
@@ -23,15 +23,19 @@ idx = 0
 def stack_metrics():
     if len(db.keys()) == 0: return
 
-    start_id = list(db.keys())[0]
-    end_id = start_id - 1
+    ids = []
     for id, value in db.items():
         if "diff_ms" in value:
             path = str(value["path"])
-            metrics["e2e_count_total"][path] += 1
-            metrics["e2e_latency_total"][path] += value["diff_ms"]
-            end_id = id
-    for id in range(start_id, end_id + 1):
+            key = value["key"]
+            if key not in metrics["e2e_count_total"]:
+                metrics["e2e_count_total"][key] = defaultdict(int)
+            if key not in metrics["e2e_latency_total"]:
+                metrics["e2e_latency_total"][key] = defaultdict(float)
+            metrics["e2e_count_total"][key][path] += 1
+            metrics["e2e_latency_total"][key][path] += value["diff_ms"]
+            ids.append(id)
+    for id in ids:
         del db[id]
 
 set_interval(stack_metrics, 1)
@@ -47,6 +51,7 @@ class EndRequest(BaseModel):
 class StartRequest(BaseModel):
     path: List[str]
     end_url: str
+    key: str
 
 @app.post("/start")
 def post_start(file: UploadFile = File(...), req: StartRequest = Depends()):
@@ -59,8 +64,10 @@ def post_start(file: UploadFile = File(...), req: StartRequest = Depends()):
     msg = '{{ "target_url": "{}","message": {{ "id": {} }} }}'.format(req.end_url, id)
 
     for target_url in req.path[:0:-1]:
-        msg = '{{"next": {{"target_url": "{}", "message": {{ "next": {} }} }}}}'.format(target_url, msg)
-    db[id] = { "start_time": datetime.now(), "path": req.path }
+        msg = '{{"target_url": "{}", "message": {{ "next": {} }} }}'.format(target_url, msg)
+    msg = '{{"next": {} }}'.format(msg)
+    
+    db[id] = { "start_time": datetime.now(), "path": req.path, "key": req.key }
     
     target_url = req.path[0]
     data = load_json_one_depth_v2(msg, ["next"])
@@ -80,12 +87,41 @@ def post_end(file: UploadFile = File(...), req: EndRequest = Depends()):
 @app.get("/metrics", response_class=PlainTextResponse)
 def get_metrics():
     result = ""
-    for name, label_and_value in metrics.items():
-        for label, value in label_and_value.items():
-            result += '{}{{path="{}"}} {}\n'.format(name, label, value)
+    for name, key_and_pathValue in metrics.items():
+        for key, path_and_value in key_and_pathValue.items():
+            for path, value in path_and_value.items():
+                result += '{}{{key="{}", path="{}"}} {}\n'.format(name, key, path, value)
     return result
 
+@app.get("/metrics/{key}")
+def get_metrics_by_key(key: str):
+    latency = 0
+    cnt = 0
+    for name, key_and_pathValue in metrics.items():
+        for k, path_and_value in key_and_pathValue.items():
+            if key != k:
+                continue
+            for _, value in path_and_value.items():
+                if name == "e2e_count_total":
+                    cnt += value
+                if name == "e2e_latency_total":
+                    latency += value
+    return { "latency": latency, "count": cnt }
 
+@app.delete("/metrics")
+def delete_all_metrics():
+    global metrics
+    metrics = {
+        "e2e_count_total": {},
+        "e2e_latency_total": {},
+    }
+
+@app.delete("/metrics/{key}")
+def delete_metrics_by_key(key: str):
+    if key in metrics["e2e_count_total"].keys():
+        del metrics["e2e_count_total"][key]
+    if key in metrics["e2e_latency_total"].keys():
+        del metrics["e2e_latency_total"][key]
 
 @app.get("/")
 def root():
