@@ -1,6 +1,5 @@
 import os
-import json
-import requests
+import aiohttp
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -54,7 +53,7 @@ class StartRequest(BaseModel):
     key: str
 
 @app.post("/start")
-def post_start(file: UploadFile = File(...), req: StartRequest = Depends()):
+async def post_start(file: UploadFile = File(...), req: StartRequest = Depends()):
     global idx
     idx += 1
     id = idx
@@ -70,11 +69,19 @@ def post_start(file: UploadFile = File(...), req: StartRequest = Depends()):
     db[id] = { "start_time": datetime.now(), "path": req.path, "key": req.key }
     
     target_url = req.path[0]
-    data = load_json_one_depth_v2(msg, ["next"])
+    params = load_json_one_depth_v2(msg, ["next"])
     files = { "file": (file.filename, file.file.read(), file.content_type) }
     
-    requests.post(target_url, headers={'accept': 'application/json'}, files=files, params=data)
-    return "ok"
+    return await call_sfc(target_url, files, params)
+
+async def call_sfc(target_url, files, params):
+    async with aiohttp.ClientSession() as session:
+        data = aiohttp.FormData()
+        for key, file_info in files.items():
+            data.add_field(key, file_info[1], filename=file_info[0], content_type=file_info[2])
+        async with session.post(target_url, headers={'accept': 'application/json'}, data=data, params=params) as response:
+            await response.text()
+            return "ok"
 
 @app.post("/end")
 def post_end(file: UploadFile = File(...), req: EndRequest = Depends()):
